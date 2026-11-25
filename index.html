@@ -15,11 +15,40 @@
   #stage { position: fixed; inset: 0; background: #000; }
   canvas { display: block; width: 100%; height: 100%; }
   #fps { position: fixed; left: 10px; top: 8px; color: #6ff; font: 12px/1.4 ui-monospace, monospace; opacity: .8; display: none; }
+
+  /* 音乐按钮 + 首次提示 */
+  #music {
+    position: fixed; right: max(14px, env(safe-area-inset-right));
+    bottom: max(14px, env(safe-area-inset-bottom));
+    width: 46px; height: 46px; border-radius: 50%;
+    border: 1px solid rgba(255,190,220,.6); background: rgba(10,2,7,.82);
+    color: #fff0f6; font-size: 22px; line-height: 43px; text-align: center;
+    text-shadow: 0 0 8px rgba(255,150,200,.9);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+    box-shadow: 0 0 14px rgba(255,140,190,.28);
+    cursor: pointer; z-index: 3; user-select: none; transition: opacity .3s, background .3s, transform .15s;
+    padding: 0;
+  }
+  #music:active { transform: scale(.94); }
+  #music.off { opacity: .62; }
+  #hint {
+    position: fixed; left: 50%; bottom: max(26px, calc(env(safe-area-inset-bottom) + 14px));
+    transform: translateX(-50%);
+    font: 13px/1.4 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    color: #ffdcec; background: rgba(8,0,6,.62);
+    border: 1px solid rgba(255,180,215,.38); border-radius: 999px;
+    padding: 8px 15px; white-space: nowrap; z-index: 3;
+    box-shadow: 0 2px 14px rgba(0,0,0,.45);
+    transition: opacity .6s; pointer-events: none;
+  }
+  #hint.hide { opacity: 0; }
 </style>
 </head>
 <body>
 <div id="stage"><canvas id="tree"></canvas></div>
 <div id="fps">--</div>
+<button id="music" class="off" aria-label="圣诞歌">♪</button>
+<div id="hint">🎵 点一下屏幕，有圣诞歌</div>
 
 <script>
 (() => {
@@ -351,6 +380,149 @@ function frame(now) {
   }
 
   requestAnimationFrame(frame);
+}
+
+/* ================== 圣诞歌：Web Audio 合成《Jingle Bells》铃声 ================== */
+const MUSIC_ENABLED = true;      // 关掉就设成 false
+const Music = (() => {
+  const PITCH = {
+    G3: 196.00, C4: 261.63, D4: 293.66, E4: 329.63,
+    F4: 349.23, G4: 392.00, A4: 440.00, C5: 523.25
+  };
+  const BEAT = 0.46;                    // 每拍时长（约 130 BPM）
+
+  // [音高 / 0=休止, 拍数]；旋律为公有领域的《Jingle Bells》
+  const MELODY = [
+    [PITCH.E4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.G4, 1], [PITCH.C4, 1], [PITCH.D4, 1],
+    [PITCH.E4, 3], [0, 1],
+
+    [PITCH.F4, 1], [PITCH.F4, 1], [PITCH.F4, 2],
+    [PITCH.F4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.D4, 1], [PITCH.D4, 1], [PITCH.E4, 1],
+    [PITCH.D4, 2], [PITCH.G4, 2],
+
+    [PITCH.E4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.G4, 1], [PITCH.C4, 1], [PITCH.D4, 1],
+    [PITCH.E4, 3], [0, 1],
+
+    [PITCH.F4, 1], [PITCH.F4, 1], [PITCH.F4, 2],
+    [PITCH.F4, 1], [PITCH.E4, 1], [PITCH.E4, 2],
+    [PITCH.E4, 1], [PITCH.G4, 1], [PITCH.G4, 1], [PITCH.F4, 1],
+    [PITCH.D4, 1], [PITCH.C4, 3], [0, 2]
+  ];
+
+  let actx = null, master = null, playing = false, nextStart = 0, timer = null;
+
+  function ensure() {
+    if (actx) return;
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    actx = new AC();
+    master = actx.createGain();
+    master.gain.value = 0;
+    // 轻压缩，让铃声更稳
+    if (actx.createDynamicsCompressor) {
+      const comp = actx.createDynamicsCompressor();
+      comp.threshold.value = -18; comp.knee.value = 22;
+      comp.ratio.value = 3; comp.attack.value = 0.01; comp.release.value = 0.25;
+      master.connect(comp); comp.connect(actx.destination);
+    } else {
+      master.connect(actx.destination);
+    }
+  }
+
+  // 铃声：几个泛音 + 指数衰减
+  function bell(t, freq, dur) {
+    if (!freq) return;
+    const env = actx.createGain();
+    env.connect(master);
+    const partials = [[1, 1.0], [2, 0.42], [3, 0.22], [4.2, 0.11], [5.6, 0.06]];
+    for (const [mul, amp] of partials) {
+      const osc = actx.createOscillator();
+      osc.type = "sine";
+      osc.frequency.value = freq * mul;
+      const g = actx.createGain();
+      g.gain.value = amp * 0.55;
+      osc.connect(g); g.connect(env);
+      osc.start(t); osc.stop(t + dur + 0.3);
+    }
+    const len = Math.max(0.55, dur * 0.9);
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(1, t + 0.006);
+    env.gain.exponentialRampToValueAtTime(0.0008, t + len);
+  }
+
+  // 把一轮旋律排进时间轴，返回结束时间
+  function schedule(from) {
+    let t = from;
+    for (const [f, beats] of MELODY) {
+      const dur = beats * BEAT;
+      bell(t, f, dur * 1.05);
+      t += dur;
+    }
+    return t + 0.9;                    // 每轮之间留一点空气
+  }
+
+  function pump() {
+    if (!playing || !actx) return;
+    const horizon = actx.currentTime + 2.5;
+    while (nextStart < horizon) nextStart = schedule(nextStart);
+  }
+
+  function start() {
+    if (!MUSIC_ENABLED) return;
+    ensure();
+    if (!actx) return;
+    if (actx.state === "suspended") actx.resume();
+    playing = true;
+    master.gain.cancelScheduledValues(actx.currentTime);
+    master.gain.setTargetAtTime(0.12, actx.currentTime, 0.25);
+    nextStart = actx.currentTime + 0.15;
+    if (!timer) timer = setInterval(pump, 150);
+    pump();
+  }
+
+  function stop() {
+    if (!actx) return;
+    playing = false;
+    master.gain.setTargetAtTime(0, actx.currentTime, 0.25);
+  }
+
+  return { start, stop, isPlaying: () => playing };
+})();
+
+/* ---------- 音乐按钮交互 ---------- */
+const musicBtn = document.getElementById("music");
+const hintEl = document.getElementById("hint");
+function refreshBtn() {
+  musicBtn.textContent = Music.isPlaying() ? "♫" : "♪";
+  musicBtn.classList.toggle("off", !Music.isPlaying());
+}
+function hideHint() { hintEl.classList.add("hide"); }
+
+if (MUSIC_ENABLED) {
+  // 浏览器要求先有用户手势，点哪儿都算
+  const firstTouch = () => {
+    Music.start();
+    refreshBtn(); hideHint();
+    window.removeEventListener("pointerdown", firstTouch);
+    window.removeEventListener("keydown", firstTouch);
+  };
+  window.addEventListener("pointerdown", firstTouch, { passive: true });
+  window.addEventListener("keydown", firstTouch);
+
+  musicBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (Music.isPlaying()) Music.stop(); else Music.start();
+    refreshBtn(); hideHint();
+  });
+  setTimeout(hideHint, 9000);
+} else {
+  musicBtn.style.display = "none";
+  hintEl.style.display = "none";
 }
 
 resize();
