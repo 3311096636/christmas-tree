@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no" />
+<meta name="theme-color" content="#000000" />
+<title>Merry Christmas · 3D 旋转圣诞树</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: #000; overflow: hidden;
+    overscroll-behavior: none; touch-action: none;
+    -webkit-tap-highlight-color: transparent;
+  }
+  #stage { position: fixed; inset: 0; background: #000; }
+  canvas { display: block; width: 100%; height: 100%; }
+  #fps { position: fixed; left: 10px; top: 8px; color: #6ff; font: 12px/1.4 ui-monospace, monospace; opacity: .8; display: none; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="tree"></canvas></div>
+<div id="fps">--</div>
+
+<script>
+(() => {
+"use strict";
+
+/* ================== 可调参数：改这里就行 ================== */
+const CONFIG = {
+  title: "Merry Christmas",   // 主标题
+  subtitle: "芝芝",            // 副标题（原版这里是作者自己的 "647"，留空则不显示）
+  density: 1.0,               // 粒子密度，卡的话调成 0.5 ~ 0.8
+  snow: true,                 // 前景大雪花开关
+  portrait: { f: 0.76, cy: 0.53 },    // 竖屏：焦距系数、画面垂直中心
+  landscape: { f: 0.63, cy: 0.50 }   // 横屏：沿用原版参数
+};
+
+/* 可选：用链接参数临时换文字，例如 index.html?name=小明 */
+const qs = new URLSearchParams(location.search);
+if (qs.get("name"))  CONFIG.subtitle = qs.get("name");
+if (qs.get("title")) CONFIG.title = qs.get("title");
+
+/* ================== 全局参数（与原版一致） ================== */
+const CAM_DIST   = 13;
+const CAM_HEIGHT = 6.0;
+const PITCH      = -0.25;
+const TREE_HEIGHT = 12.0;
+const SPIN_SPEED = 0.27;     // 弧度/秒 ≈ 原版 0.0045/帧 @60fps
+
+const TREE_POINTS   = Math.round(50000 * CONFIG.density);
+const GROUND_POINTS = Math.round(4000  * CONFIG.density);
+const STAR_POINTS   = Math.round(1200  * CONFIG.density);
+const HEART_POINTS  = Math.round(1000  * CONFIG.density);
+const SNOW2D_POINTS = 10;
+
+const TAU = Math.PI * 2;
+const rnd  = (a, b) => a + Math.random() * (b - a);
+const rint = (a, b) => Math.floor(a + Math.random() * (b - a + 1));
+function gauss(mu, sd) {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return mu + sd * Math.sqrt(-2 * Math.log(u)) * Math.cos(TAU * v);
+}
+
+/* ================== 粒子数据 ================== */
+const TOTAL = TREE_POINTS + GROUND_POINTS + STAR_POINTS + HEART_POINTS;
+const px = new Float32Array(TOTAL);
+const py = new Float32Array(TOTAL);
+const pz = new Float32Array(TOTAL);
+const cr = new Uint8Array(TOTAL);
+const cg = new Uint8Array(TOTAL);
+const cb = new Uint8Array(TOTAL);
+let n = 0;
+
+function push(x, y, z, r, g, b) {
+  px[n] = x; py[n] = y; pz[n] = z;
+  cr[n] = r; cg[n] = g; cb[n] = b;
+  n++;
+}
+
+/* --- 圣诞树：70% 螺旋灯带 + 30% 蓬松填充 --- */
+(function genTree() {
+  const loops = 9;
+  const spiralN = Math.floor(TREE_POINTS * 0.7);
+  for (let i = 0; i < spiralN; i++) {
+    const u = Math.random();
+    const h = Math.pow(u, 1.6);
+    const y = TREE_HEIGHT * h + 0.2;
+
+    let baseR = Math.pow(1 - h, 1.1) * 3.2;
+    baseR *= 1.0 + 0.65 * Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+
+    const angle = u * loops * TAU + rnd(-0.22, 0.22);
+    const r = baseR * rnd(0.85, 1.08);
+
+    let mid = Math.max(0.15, 1.0 - Math.abs(h - 0.55) * 1.5);
+    const baseG = 155 + Math.floor(90 * mid);
+    const baseB = 185 + Math.floor(70 * mid);
+
+    let R = 255, G = baseG + rint(-15, 20), B = baseB + rint(-15, 35);
+    if (Math.random() < 0.08) { R = 255; G = 255 - rint(0, 35); B = 230 + rint(0, 25); }
+    push(Math.cos(angle) * r, y, Math.sin(angle) * r, R, Math.min(255, G), Math.min(255, B));
+  }
+
+  for (let i = 0; i < TREE_POINTS - spiralN; i++) {
+    const h = Math.pow(Math.random(), 1.9);
+    const y = TREE_HEIGHT * h + 0.2 + rnd(-0.08, 0.08);
+
+    let baseR = Math.pow(1 - h, 1.1) * 4.3;
+    baseR *= 1.0 + 0.65 * Math.max(0, Math.sin((h * 5.8 + 0.15) * TAU));
+
+    const r = baseR * Math.sqrt(Math.random());
+    const angle = Math.random() * TAU;
+    push(Math.cos(angle) * r + rnd(-0.08, 0.08), y,
+         Math.sin(angle) * r + rnd(-0.08, 0.08), 255, rint(165, 225), rint(190, 250));
+  }
+})();
+
+/* --- 地面光环 --- */
+(function genGround() {
+  const rings = [4.6, 6.0, 7.4, 8.8, 10.2, 11.4];
+  for (let i = 0; i < GROUND_POINTS; i++) {
+    const r = gauss(rings[Math.floor(Math.random() * rings.length)], 0.3);
+    const th = Math.random() * TAU;
+    const c = Math.random() < 0.15 ? rint(235, 255) : rint(190, 235);
+    push(Math.cos(th) * r, -0.25, Math.sin(th) * r, c, c, 255);
+  }
+})();
+
+/* --- 空中星点 --- */
+(function genStars() {
+  for (let i = 0; i < STAR_POINTS; i++) {
+    const b = rint(215, 255);
+    push(rnd(-18, 18), rnd(3, 18), rnd(-18, 18), b, b, 255);
+  }
+})();
+
+/* --- 树顶 3D 爱心 --- */
+(function genHeart() {
+  const scale = 0.9, topY = TREE_HEIGHT + 0.05;
+  let guard = 0;
+  while (n < TOTAL && guard++ < HEART_POINTS * 60) {
+    const hx = rnd(-1.3, 1.3), hy = rnd(-1.4, 1.4);
+    if (Math.pow(hx * hx + hy * hy - 1.0, 3) - hx * hx * Math.pow(hy, 3) > 0) continue;
+    const factor = Math.max(0.35, 1.15 - 0.5 * Math.hypot(hx, hy));
+    const g = Math.max(120, Math.min(255, Math.floor(130 * factor + 80)));
+    const b = Math.max(120, Math.min(255, Math.floor(190 * factor + 70)));
+    push(hx * scale * 0.8, topY + (hy + 1.0) * scale * 0.5, rnd(-0.18, 0.18), 255, g, b);
+  }
+  while (n < TOTAL) push(0, TREE_HEIGHT + 0.6, 0, 255, 150, 200);
+})();
+
+/* ================== 雪花 ================== */
+const flakes = [];
+let W = 1600, H = 900;                       // 当前画布尺寸（设备像素）
+
+function respawn(f) {
+  f.x = rnd(0, W);
+  f.y = rnd(-80, -10);
+  f.r = rnd(10, 16);
+  f.v = rnd(30, 45);
+  f.maxLife = f.life = (H + 80 - f.y) / f.v;
+}
+for (let i = 0; i < SNOW2D_POINTS; i++) { const f = {}; respawn(f); flakes.push(f); }
+
+/* ================== 画布 / 自适应 ================== */
+const stage = document.getElementById("stage");
+const canvas = document.getElementById("tree");
+const ctx = canvas.getContext("2d", { alpha: false });
+
+let img = null, buf = null, u32 = null;
+let F = 567, ss = 1, CX = 800, CY = 450, sizeK = 1, fontPx = 45, textX = 40, textY = 300;
+
+const sxa = new Int32Array(TOTAL);
+const sya = new Int32Array(TOTAL);
+const rada = new Uint8Array(TOTAL);
+const keya = new Int32Array(TOTAL);
+const cola = new Uint32Array(TOTAL);
+const counts = new Int32Array(65536);
+const order = new Int32Array(TOTAL);
+const KSCALE = 1200, KORIGIN = 40;
+
+const discCache = new Map();
+function disc(r) {
+  let t = discCache.get(r);
+  if (t) return t;
+  const out = [];
+  for (let dy = -r; dy <= r; dy++) {
+    for (let dx = -r; dx <= r; dx++) {
+      const d = Math.sqrt(dx * dx + dy * dy);
+      if (d <= r + 0.45) out.push(dx, dy, (r > 1 && d > r - 0.1) ? 1 : 0);
+    }
+  }
+  discCache.set(r, out);
+  return out;
+}
+
+function resize() {
+  const cw = Math.max(1, canvas.clientWidth  || window.innerWidth);
+  const ch = Math.max(1, canvas.clientHeight || window.innerHeight);
+
+  let dpr = Math.min(window.devicePixelRatio || 1, 2);
+  let w = Math.round(cw * dpr), h = Math.round(ch * dpr);
+
+  const MAXPX = 1_700_000;                       // 控制每帧像素量，保证手机流畅
+  if (w * h > MAXPX) {
+    const k = Math.sqrt(MAXPX / (w * h));
+    w = Math.round(w * k); h = Math.round(h * k);
+  }
+  if (w * h < 300_000) {                         // 太小的屏也别太糊
+    const k = Math.sqrt(300_000 / (w * h));
+    w = Math.round(w * k); h = Math.round(h * k);
+  }
+
+  canvas.width = w; canvas.height = h;
+  W = w; H = h;
+
+  img = ctx.createImageData(w, h);
+  buf = img.data;
+  u32 = new Uint32Array(buf.buffer);
+
+  const portrait = h > w;
+  const p = portrait ? CONFIG.portrait : CONFIG.landscape;
+
+  F = p.f * (portrait ? w : h);                  // 相机焦距
+  CX = w * 0.5;
+  CY = h * p.cy;
+  sizeK = F / 567;                               // 点大小随构图缩放
+  ss = h / 900;                                  // 文字/雪花比例
+  fontPx = Math.min(45 * ss, w * 0.09);
+  textX = Math.max(12, w * (portrait ? 0.06 : 0.025));
+  textY = portrait ? h * 0.10 : h / 3;
+
+  // 雪花坐标贴合新尺寸
+  for (const f of flakes) respawn(f);
+}
+
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", () => setTimeout(resize, 150));
+if (window.ResizeObserver) new ResizeObserver(() => resize()).observe(stage);
+window.addEventListener("load", resize);
+
+/* ================== 主循环 ================== */
+let angle = 0, last = performance.now();
+let fpsAcc = 0, fpsFrames = 0, fpsVal = 0;
+const showFps = /[?&]fps/.test(location.search);
+const fpsEl = document.getElementById("fps");
+if (showFps) fpsEl.style.display = "block";
+
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05);
+  last = now;
+  angle += dt * SPIN_SPEED;
+
+  const ca = Math.cos(angle), sa = Math.sin(angle);
+  const cp = Math.cos(PITCH), sp = Math.sin(PITCH);
+
+  /* --- 投影 + 计数排序（远 → 近） --- */
+  counts.fill(0);
+  let m = 0;
+
+  for (let i = 0; i < TOTAL; i++) {
+    const x = px[i], z0 = pz[i];
+    const xz = x * ca - z0 * sa;
+    const zz = x * sa + z0 * ca;
+
+    const yp = py[i] * cp - zz * sp - CAM_HEIGHT;
+    const zp = py[i] * sp + zz * cp + CAM_DIST;
+    if (zp <= 0.1) continue;
+
+    const f = F / zp;
+    const sx = Math.floor(CX + xz * f);
+    const sy = Math.floor(CY - yp * f);
+    if (sx < 4 || sy < 4 || sx >= W - 4 || sy >= H - 4) continue;
+
+    let size = Math.round((3.6 - zp * 0.13) * sizeK);
+    if (size < 1) size = 1; else if (size > 8) size = 8;
+
+    let key = Math.floor((KORIGIN - zp) * KSCALE);
+    if (key < 0) key = 0; else if (key > 65535) key = 65535;
+
+    sxa[m] = sx; sya[m] = sy; rada[m] = size; keya[m] = key;
+    cola[m] = 0xFF000000 | (cb[i] << 16) | (cg[i] << 8) | cr[i];
+    counts[key]++;
+    m++;
+  }
+
+  let sum = 0;
+  for (let k = 0; k < 65536; k++) { const c = counts[k]; counts[k] = sum; sum += c; }
+  for (let j = 0; j < m; j++) order[counts[keya[j]]++] = j;
+
+  /* --- 清屏 + 不透明绘制 --- */
+  u32.fill(0xFF000000);
+
+  for (let p = 0; p < m; p++) {
+    const j = order[p];
+    const sx = sxa[j], sy = sya[j], col = cola[j];
+    const R = col & 255, G = (col >> 8) & 255, B = (col >> 16) & 255;
+    const tpl = disc(rada[j]);
+
+    for (let t = 0; t < tpl.length; t += 3) {
+      const tx = sx + tpl[t], ty = sy + tpl[t + 1];
+      if (tx < 0 || ty < 0 || tx >= W || ty >= H) continue;
+      const o = (ty * W + tx) << 2;
+      if (tpl[t + 2]) {
+        buf[o]     = (buf[o]     + R) >> 1;
+        buf[o + 1] = (buf[o + 1] + G) >> 1;
+        buf[o + 2] = (buf[o + 2] + B) >> 1;
+      } else {
+        buf[o] = R; buf[o + 1] = G; buf[o + 2] = B;
+      }
+    }
+  }
+
+  ctx.putImageData(img, 0, 0);
+
+  /* --- 前景雪花 --- */
+  if (CONFIG.snow) {
+    ctx.globalCompositeOperation = "lighter";
+    for (const fl of flakes) {
+      fl.y += fl.v * dt * (H / 900);
+      fl.life -= dt;
+      if (fl.life <= 0 || fl.y > H + 50) { respawn(fl); continue; }
+      const a = Math.min(1, fl.life / fl.maxLife / 0.3);
+      const r = fl.r * ss * 1.7;
+      const g = ctx.createRadialGradient(fl.x, fl.y, 0, fl.x, fl.y, r);
+      g.addColorStop(0,    "rgba(255,255,255," + (0.9 * a) + ")");
+      g.addColorStop(0.35, "rgba(215,238,255," + (0.45 * a) + ")");
+      g.addColorStop(1,    "rgba(160,205,255,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(fl.x, fl.y, r, 0, TAU); ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+  }
+
+  /* --- 文字 --- */
+  ctx.font = 'italic ' + fontPx + 'px "Monotype Corsiva", "Segoe Script", "Brush Script MT", "KaiTi", "STKaiti", "Kaiti SC", "Microsoft YaHei", cursive';
+  ctx.fillStyle = "#fff";
+  ctx.textBaseline = "top";
+  ctx.shadowColor = "rgba(150,215,255,.5)";
+  ctx.shadowBlur = 16 * Math.max(1, ss);
+  ctx.fillText(CONFIG.title, textX, textY);
+  if (CONFIG.subtitle) ctx.fillText(CONFIG.subtitle, textX, textY + fontPx * 1.35);
+  ctx.shadowBlur = 0;
+
+  if (showFps) {
+    fpsAcc += dt; fpsFrames++;
+    if (fpsAcc >= 0.5) { fpsVal = Math.round(fpsFrames / fpsAcc); fpsAcc = 0; fpsFrames = 0; }
+    fpsEl.textContent = fpsVal + " fps · " + TOTAL + " pts · " + W + "x" + H;
+  }
+
+  requestAnimationFrame(frame);
+}
+
+resize();
+requestAnimationFrame((t) => { last = t; requestAnimationFrame(frame); });
+})();
+</script>
+</body>
+</html>
